@@ -35,12 +35,12 @@ public:
         int x;
         int raveTn;
         int rave_x;
-        float UCT_val = std::numeric_limits<float>::max();
         board state; // current board state       
         board::point parent_move;
-        std::vector<Node*> child2board; // keep action according to the board position
-        std::vector<board::point> legal;
-        std::vector<Node*> children;
+        vector<Node*> child2board; // keep action according to the board position
+        vector<board::point> legal;
+        vector<Node*> children;
+
         Node(board b, std::default_random_engine& engine) : Tn(0), x(0), raveTn(0), rave_x(0), state(b) {
             child2board.resize(board::size_x * board::size_y, NULL);
             for (int i = 0; i < board::size_x * board::size_y; i++) {
@@ -53,9 +53,7 @@ public:
         }
     };
 
-    MCTS() : uniform(0, boardSize) {
-        //srand(time(NULL));
-        //engine.seed(rand() % 100000);
+    MCTS(){
         engine.seed(1234);
         boardSize = board::size_x * board::size_y;
         visited.resize(boardSize, false);
@@ -64,7 +62,7 @@ public:
             actions.push_back(board::point(i));
     }
 
-    void search(const board& b, int simulation_time, float constant) {
+    void run(const board& b, int simulation_time, float constant) {
         nodePool.reserve(simulation_time + 2);
         root = new Node(b, engine);
         nodePool.push_back(*root);
@@ -78,11 +76,11 @@ public:
         }
     }
 
-    int getSimulationCount(int actionIndex) {
-        if (root->child2board[actionIndex] == NULL)
-            return 0;
+    int getTn(int point) {
+        if (root->child2board[point] != NULL)
+            return root->child2board[point]->Tn;
         else
-            return root->child2board[actionIndex]->Tn;
+            return 0;
     }
 
     int traverse(Node* node, bool isOpponent=false) {
@@ -117,7 +115,8 @@ public:
                 bestChild = node->children[i];
                 return bestChild;
             }
-            float val = calculate_UCT((node->children[i]), node->Tn, isOpponent);
+            double val;
+            calculate_UCT(*(node->children[i]), node->Tn, isOpponent, val);
             if (maxUCT < val) {
                 maxUCT = val;
                 bestChild = node->children[i];
@@ -172,53 +171,48 @@ public:
     }
 
     Node* expansion(Node* node) {
-        /*board after = node->state;
+        board after = node->state;
         board::point move = node->legal.back();
         node->legal.pop_back();
         after.place(move);
-
-        Node* newNode = new Node(after, engine);
-        newNode->parent_move = move;
-        nodePool.push_back(*newNode);        
-        node->child2board[move.i] = newNode;
-        node->children.push_back(newNode);
-        return newNode;*/
-
-        board curPosition = node->state;
-        board::point move = node->legal.back();
-        node->legal.pop_back();
-        curPosition.place(move);
-        nodePool.push_back(Node(curPosition, engine));
+        
+        nodePool.push_back(Node(after, engine));
         nodePool.back().parent_move = move;
-        node->child2board[move.i] = &nodePool.back();
         node->children.push_back(&nodePool.back());
+        node->child2board[move.i] = &nodePool.back();
+        
         return node->children.back();
     }
 
     void backpropagation(Node* node, int result) {
         node->Tn++;
         node->x += result;
-
+        
         for(Node* child : node->children){
             child->raveTn++;
             child->rave_x += result;
         }
     }
 
-    float calculate_UCT(Node* node, int N, bool isOpponent) {
-        if(node->x == 0 || node->Tn == 0) return;
-		node->UCT_val = (double)((double)node->x / node->Tn) + 0.5 * (double)sqrt( (double)log((double)N) / node->Tn);
+    void calculate_UCT(Node& node, int N, bool isOpponent, double& UCT_val) {
+        if (node.Tn == 0) return;
+        double beta = (double)node.raveTn / ((double)node.Tn + (double)node.raveTn + 4 * (double)node.Tn * (double)node.raveTn * 0.025 * 0.025);
+        double winRate = (double)node.x / (double)(node.Tn + 1);
+        double raveWinRate = (double)node.rave_x / (double)(node.raveTn + 1);
+        double exploit = (isOpponent) ? (1 - beta) * (1 - winRate) + beta * (1 - raveWinRate) : (1 - beta) * winRate + beta * raveWinRate;
+        double explore = sqrt(log(N) / (double)(node.Tn + 1));
+        UCT_val = exploit + c * explore;
     }
 
 private:
     Node* root;
     float c;
-    std::vector<board::point> actions;
-    std::vector<Node> nodePool;
+    vector<board::point> actions;
+    vector<Node> nodePool;
     std::vector<bool> visited;
     board::piece_type who;
-    std::default_random_engine engine;
-    std::uniform_int_distribution<int> uniform;
+    default_random_engine engine;
+    uniform_int_distribution<int> uniform;
     int boardSize;
 };
 
@@ -266,15 +260,14 @@ public:
 		if (meta.find("simulation") != meta.end())
 			simulation_time = (int(meta["simulation"]));
 		if (meta.find("parallel") != meta.end())
-			parallel = (int(meta["parallel"]));
+			numOfThread = (int(meta["parallel"]));
 	}
 	virtual ~random_agent() {}
 
 protected:
 	std::default_random_engine engine;
 	int simulation_time;
-	int parallel;
-	//string uctType;
+	int numOfThread;
 };
 
 /**
@@ -296,31 +289,32 @@ public:
 	}
 
 	virtual action take_action(const board& state) {
-		//int actionSize = space.size();
-        std::vector<MCTS> mcts(parallel);
-        std::vector<std::thread> threads;
-        for (int i = 0; i < parallel; i++) {
-            threads.push_back(std::thread(&MCTS_player::runMCTS, this, state, &mcts[i]));
+        vector<MCTS> mcts(numOfThread);
+        vector<thread> threads;
+        for (int i = 0; i < numOfThread; i++) {
+            threads.push_back(thread(&MCTS_player::runMCTS, this, state, &mcts[i]));
         }
-        for (int i = 0; i < parallel; i++) {
+        for (int i = 0; i < numOfThread; i++) {
             threads[i].join();
         }
+
         int max_count = -1;
         int key = 0;
         for (int i = 0; i < int(space.size()); i++) {
             int total = 0;
-            for (int j = 0; j < parallel; j++)
-                total += mcts[j].getSimulationCount(i);
+            for (int j = 0; j < numOfThread; j++)
+                total += mcts[j].getTn(i);
             if (max_count < total) {
                 max_count = total;
                 key = i;
             }
         }
+
         return action::place(board::point(key), who);
 	}
 
     void runMCTS(board state, MCTS* mcts) {
-        mcts->search(state, simulation_time, 0.5);
+        mcts->run(state, simulation_time, 0.5);
     }
 
 private:
